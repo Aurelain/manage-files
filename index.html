@@ -129,17 +129,15 @@
             .wrapper-inline {
                 display: inline-block;
                 padding: 1px 1px 4px 1px;
-                min-height: 128px;
-                min-width: 128px;
+                min-height: 256px;
+                min-width: 256px;
                 white-space: nowrap;
                 overflow: hidden;
             }
 
             img {
-                min-height: 128px;
-                min-width: 128px;
-                max-height: 256px;
-                max-width: 256px;
+                height: 256px;
+                width: 256px;
                 user-select: none;
                 display:block;
             }
@@ -277,6 +275,8 @@
             let ast; // abstract-syntax-tree
             let selected = [];
             let foundFiles = [];
+            let pathToMeta;
+            let observer;
 
             // =========================================================================================================
             // M A I N
@@ -297,7 +297,6 @@
                 on('click', '#close', rootsModal.close.bind(rootsModal));
                 on('click', '#roots-add', onRootsAddClick);
                 on('click', '#roots-renew', onRootsRenewClick);
-                // duplicateModal.showModal();
 
                 // Filters:
                 inputFilters.value = window.location.hash.substring(1);
@@ -307,6 +306,7 @@
                 checkFilter();
 
                 // Launch:
+                setupObserver();
                 roots = await readFromDb(ROOTS) || [];
                 await populateRoots();
 
@@ -322,6 +322,7 @@
              */
             async function render() {
                 foundFiles = await findFiles(ast);
+                pathToMeta = foundFiles.reduce((acc, meta) => Object.assign(acc, {[meta.path]:meta}), {});
                 const sorted = sortNaturally(foundFiles);
                 const grouped = groupByStem(sorted);
                 populateFileList(grouped);
@@ -333,8 +334,8 @@
              */
             async function findFiles(ast) {
                 const output = [];
-                for (const {handle} of roots) {
-                    output.push(...await findInDirectory(handle, ast));
+                for (const root of roots) {
+                    output.push(...await findInDirectory(root.handle, ast, '', root));
                 }
                 return output;
             }
@@ -342,23 +343,24 @@
             /**
              *
              */
-            async function findInDirectory(dirHandle, ast, currentPath = '') {
+            async function findInDirectory(dirHandle, ast, currentPath, root) {
                 const output = [];
                 const entries = await getFiles(dirHandle);
                 for (const [name, handle] of entries) {
                     const fullPath = `${currentPath}/${name}`;
                     if (!ast || evaluateNode(ast, fullPath)) {
                         if (handle.kind === 'directory') {
-                            output.push(...await findInDirectory(handle, null, fullPath));
+                            output.push(...await findInDirectory(handle, null, fullPath, root));
                         } else {
                             output.push({
                                 file: await handle.getFile(),
                                 path: fullPath,
+                                root,
                             });
                         }
                     } else {
                         if (handle.kind === 'directory') {
-                            output.push(...await findInDirectory(handle, ast, fullPath));
+                            output.push(...await findInDirectory(handle, ast, fullPath, root));
                         }
                     }
                 }
@@ -420,15 +422,6 @@
                             td.appendChild(buildGroup(group, isImage));
                         }
 
-                        // const wrapper = isImage ? document.createElement('div') : buildWrapper(path);
-                        // isImage && wrapper.classList.add('wrapper-basic');
-                        // wrapper.innerHTML = path;
-                        // td.appendChild(wrapper);
-                        //
-                        // if (isImage) {
-                        //     td.appendChild(buildGroup(group));
-                        // }
-
                         tr.appendChild(td);
                         tableBody.appendChild(tr);
                     }
@@ -462,29 +455,19 @@
              */
             function buildGroup(group, isImage) {
                 const div = document.createElement('div');
-                for (const {file, path} of group) {
+                for (const {path} of group) {
                     const wrapper = buildWrapper(path);
                     wrapper.classList.add('wrapper-inline');
                     if (isImage) {
-                        const img = convertFileToImgElement(file);
+                        const img = document.createElement('img');
                         img.draggable = false;
                         img.alt = path;
+                        observer.observe(img);
                         wrapper.appendChild(img);
                     }
                     div.appendChild(wrapper);
                 }
                 return div;
-            }
-
-            /**
-             *
-             */
-            function convertFileToImgElement(file) {
-                const img = document.createElement('img');
-                const url = URL.createObjectURL(file);
-                img.src = url;
-                img.onload = () => URL.revokeObjectURL(url); // clean up the object URL once the image is loaded
-                return img;
             }
 
             /**
@@ -556,6 +539,7 @@
                     });
                     await writeToDb(ROOTS, roots);
                     await populateRoots();
+                    rootsModal.close();
                 }
             }
 
@@ -623,27 +607,17 @@
             /**
              *
              */
-            function getSelectedFiles() {
-                const paths = new Set();
-                for (const element of selected) {
-                    paths.add(element.title);
-                }
-                const output = [];
-                for (const item of foundFiles) {
-                    if (paths.has(item.path)) {
-                        output.push(item);
-                    }
-                }
-                return output;
+            function getSelectedMetas() {
+                return selected.map(div => pathToMeta[div.title]);
             }
 
             /**
              *
              */
             async function duplicateSelectedFiles(destination) {
-                const selectedFiles = getSelectedFiles();
+                const selectedMetas = getSelectedMetas();
                 const destinationDirHandle = await ensureDestination(destination);
-                for (const {file} of selectedFiles) {
+                for (const {file} of selectedMetas) {
                     await duplicateFile(file, destinationDirHandle);
                 }
             }
@@ -652,10 +626,10 @@
              *
              */
             async function deleteSelectedFiles() {
-                const selectedFiles = getSelectedFiles();
-                for (const {path, file} of selectedFiles) {
+                const selectedMetas = getSelectedMetas();
+                for (const {path, file, root} of selectedMetas) {
                     const parentPath = path.replace(/[^/]*$/, '');
-                    const parentHandle = await findDir(parentPath);
+                    const parentHandle = await findDir(parentPath, [root]);
                     await parentHandle.removeEntry(file.name);
                 }
             }
@@ -668,7 +642,7 @@
                 if (!dirPath || dirPath === '/') {
                     return firstRoot;
                 }
-                let dirHandle = await findDir(dirPath);
+                let dirHandle = await findDir(dirPath, roots);
                 if (!dirHandle) {
                     dirHandle = await createDir(firstRoot, dirPath);
                 }
@@ -678,7 +652,7 @@
             /**
              *
              */
-            async function findDir(dirPath) {
+            async function findDir(dirPath, roots) {
                 const segments = dirPath.split('/').filter(p => p.length > 0);
                 for (const {handle} of roots) {
                     let currentHandle = handle;
@@ -932,6 +906,31 @@
                     default:
                         throw new Error(`Unknown node type: ${node.type}`);
                 }
+            }
+
+            // =========================================================================================================
+            // Observer
+            // =========================================================================================================
+            /**
+             *
+             */
+            function setupObserver() {
+                observer = new IntersectionObserver((entries, observer) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const img = entry.target;
+                            const path = img.parentNode.title;
+                            const file = pathToMeta[path].file;
+                            img.src = URL.createObjectURL(file);
+                            img.onload = () => URL.revokeObjectURL(img.src);
+                            observer.unobserve(img);
+                        }
+                    });
+                }, {
+                    root: null, // Use the viewport
+                    rootMargin: '200px', // Start loading 200px before they appear
+                    threshold: 0.01
+                });
             }
 
             // =========================================================================================================
